@@ -1,24 +1,5 @@
 'use strict'
 
-/**
- * @todo refactor
- * @todo move path to variable
- *
- * Task runner
- * - Js (Browserify)
- * - Less
- *
- * Why `vinyl-source-stream`
- * - http://stackoverflow.com/questions/30794356/why-do-i-have-to-use-vinyl-source-stream-with-gulp
- *
- * Reference
- * - https://github.com/BrowserSync/recipes/tree/master/recipes/gulp.browserify
- * - https://gist.github.com/neoziro/a834f55ba665a6b616b6
- * - https://gist.github.com/Falconerd/3acc15f93b6a023e43b9
- * - https://gist.github.com/Sigmus/9253068
- * - https://github.com/gulpjs/gulp/blob/master/docs/recipes/fast-browserify-builds-with-watchify.md
- */
-
 const gulp = require('gulp')
 const browserSync = require('browser-sync').create()
 const notify = require('gulp-notify')
@@ -53,69 +34,91 @@ const browserSyncOpt = {
 
 function handleError (err) {
   gulpUtil.log(err)
-
   const args = Array.prototype.slice.call(arguments)
   notify.onError({
     title: 'Compile Error',
     message: '<%= error.message %>'
   }).apply(this, args)
-
   if (typeof this.emit === 'function') this.emit('end')
 }
 
 /* ================================================================ Js task
  */
 
-const browserifyCustomOpt = {
-  entries: ['./public/src/js/main.js'],
-  debug: !isProd
-}
-const browserifyOpt = lodashAssign({}, watchify.args, browserifyCustomOpt)
-const watchifyJs = watchify(browserify(browserifyOpt))
+// For build: use plain browserify (not watchify)
+function bundleJs () {
+  const b = browserify({
+    entries: ['./public/src/js/main.js'],
+    debug: !isProd
+  }).transform('babelify', {
+    presets: ['@babel/preset-env'],
+    sourceMaps: !isProd
+  })
 
-watchifyJs.on('update', bundle)
-watchifyJs.on('log', gulpUtil.log)
+  let stream = b.bundle()
+    .on('error', gulpUtil.log.bind(gulpUtil, 'Browserify Error'))
+    .pipe(vinylSourceStream('bundle.js'))
+    .pipe(vinylBuffer())
 
-function bundle () {
   if (isProd) {
-    return watchifyJs.bundle()
-      .on('error', gulpUtil.log.bind(gulpUtil, 'Browserify Error'))
-      .pipe(vinylSourceStream('bundle.js'))
-      .pipe(vinylBuffer())
-      .pipe(babel({
-        presets: ['es2015']
-      }))
+    stream = stream
       .pipe(uglify()).on('error', handleError)
-      .pipe(gulp.dest('./public/dist/js'))
-      .pipe(browserSync.stream({
-        'once': true
-      }))
   } else {
-    return watchifyJs.bundle()
-      .on('error', gulpUtil.log.bind(gulpUtil, 'Browserify Error'))
-      .pipe(vinylSourceStream('bundle.js'))
-      .pipe(vinylBuffer())
-      .pipe(sourcemaps.init({
-        loadMaps: true
-      }))
+    stream = stream
+      .pipe(sourcemaps.init({ loadMaps: true }))
       .pipe(sourcemaps.write('./'))
-      .pipe(gulp.dest('./public/dist/js'))
-      .pipe(browserSync.stream({
-        'once': true
-      }))
   }
+
+  return stream
+    .pipe(gulp.dest('./public/dist/js'))
+    .pipe(browserSync.stream({ once: true }))
 }
 
-gulp.task('js', bundle)
+gulp.task('js', bundleJs)
+
+// For watch: use watchify for fast rebuilds
+function watchJs () {
+  const b = watchify(browserify({
+    entries: ['./public/src/js/main.js'],
+    debug: !isProd,
+    cache: {},
+    packageCache: {}
+  }).transform('babelify', {
+    presets: ['@babel/preset-env'],
+    sourceMaps: !isProd
+  }))
+
+  function rebundle () {
+    let stream = b.bundle()
+      .on('error', gulpUtil.log.bind(gulpUtil, 'Browserify Error'))
+      .pipe(vinylSourceStream('bundle.js'))
+      .pipe(vinylBuffer())
+
+    if (isProd) {
+      stream = stream
+        .pipe(uglify()).on('error', handleError)
+    } else {
+      stream = stream
+        .pipe(sourcemaps.init({ loadMaps: true }))
+        .pipe(sourcemaps.write('./'))
+    }
+
+    return stream
+      .pipe(gulp.dest('./public/dist/js'))
+      .pipe(browserSync.stream({ once: true }))
+  }
+
+  b.on('update', rebundle)
+  b.on('log', gulpUtil.log)
+
+  return rebundle()
+}
 
 /* ================================================================ Other tasks
  */
 
 gulp.task('clean', function () {
-  var cleanOpt = {
-    read: false
-  }
-
+  var cleanOpt = { read: false }
   return gulp.src('./public/dist/*', cleanOpt)
     .pipe(clean())
 })
@@ -127,9 +130,7 @@ gulp.task('less', function () {
       .pipe(autoprefixer('last 2 versions', '> 1%', 'ie 8'))
       .pipe(cssmin())
       .pipe(gulp.dest('./public/dist/css'))
-      .pipe(browserSync.stream({
-        'once': true
-      }))
+      .pipe(browserSync.stream({ once: true }))
   } else {
     return gulp.src('./public/src/less/main.less')
       .pipe(sourcemaps.init())
@@ -137,9 +138,7 @@ gulp.task('less', function () {
       .pipe(autoprefixer('last 2 versions', '> 1%', 'ie 8'))
       .pipe(sourcemaps.write('./'))
       .pipe(gulp.dest('./public/dist/css'))
-      .pipe(browserSync.stream({
-        'once': true
-      }))
+      .pipe(browserSync.stream({ once: true }))
   }
 })
 
@@ -162,20 +161,17 @@ gulp.task('sound', function () {
 gulp.task('serve', function () {
   browserSync.init(browserSyncOpt)
 
-  const watchOpt = {
-    interval: 500
-  }
+  const watchOpt = { interval: 500 }
 
   gulp.watch('./public/index.html', watchOpt).on('change', browserSync.reload)
-  gulp.watch('./public/src/less/**/*.less', ['less'])
-  gulp.watch('./public/src/asset/image/**/*', ['image'])
-  gulp.watch('./public/src/asset/sound/**/*', ['sound'])
-  gulp.watch('./public/src/js/main.js', ['js'])
+  gulp.watch('./public/src/less/**/*.less', gulp.series('less'))
+  gulp.watch('./public/src/asset/image/**/*', gulp.series('image'))
+  gulp.watch('./public/src/asset/sound/**/*', gulp.series('sound'))
+  // Use watchJs for incremental JS builds
+  gulp.watch('./public/src/js/main.js', gulp.series(watchJs))
 })
 
 // should run `clean` first
-gulp.task('build', ['less', 'js', 'image', 'sound'], function () {
-  watchifyJs.close()
-})
-gulp.task('watch', ['serve'])
-gulp.task('default', ['build'])
+gulp.task('build', gulp.series('clean', 'less', 'js', 'image', 'sound'))
+gulp.task('watch', gulp.series('serve'))
+gulp.task('default', gulp.series('build'))
